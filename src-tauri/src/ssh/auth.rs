@@ -32,6 +32,17 @@ pub(crate) fn check_auth_result(result: client::AuthResult) -> AppResult<()> {
     }
 }
 
+fn emit_passphrase_error(ctx: &AuthCtx, remaining: usize) {
+    let msg = if remaining > 0 {
+        format!("\x1b[31mIncorrect passphrase, {remaining} attempt(s) left.\x1b[0m\r\n")
+    } else {
+        "\x1b[31mIncorrect passphrase.\x1b[0m\r\n".to_string()
+    };
+    let _ = ctx
+        .app
+        .emit_bytes(&format!("ssh:data:{}", ctx.prompt_id), msg.as_bytes());
+}
+
 /// 解析私钥，遇加密时按需向终端索取 passphrase。
 ///
 /// `cache_key` 唯一标识这把私钥在本次进程内的 passphrase 缓存项：
@@ -103,14 +114,7 @@ pub(crate) async fn decode_key_with_prompt(
             }
             Err(KeyIsEncrypted) => {
                 let remaining = MAX_PASSPHRASE_RETRIES - attempt - 1;
-                let msg = if remaining > 0 {
-                    format!("\x1b[31mIncorrect passphrase, {remaining} attempt(s) left.\x1b[0m\r\n")
-                } else {
-                    "\x1b[31mIncorrect passphrase.\x1b[0m\r\n".to_string()
-                };
-                let _ = ctx
-                    .app
-                    .emit(&format!("ssh:data:{}", ctx.prompt_id), msg.into_bytes());
+                emit_passphrase_error(ctx, remaining);
             }
             Err(e) => {
                 return Err(AppError::ssh(
@@ -513,6 +517,39 @@ pub async fn authenticate_interactive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    #[test]
+    fn passphrase_errors_emit_base64_terminal_bytes() {
+        let (host, mut events) = crate::ssh::test_support::headless_host();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let ctx = AuthCtx {
+            app: host,
+            resource_id: session_id.clone(),
+            prompt_id: session_id.clone(),
+            owner: crate::state::SessionOwner::Window("main".into()),
+        };
+
+        for (remaining, expected) in [
+            (
+                2,
+                "\x1b[31mIncorrect passphrase, 2 attempt(s) left.\x1b[0m\r\n",
+            ),
+            (
+                1,
+                "\x1b[31mIncorrect passphrase, 1 attempt(s) left.\x1b[0m\r\n",
+            ),
+            (0, "\x1b[31mIncorrect passphrase.\x1b[0m\r\n"),
+        ] {
+            emit_passphrase_error(&ctx, remaining);
+            let (event, payload) = events.try_recv().unwrap();
+            assert_eq!(event, format!("ssh:data:{session_id}"));
+            let encoded = payload
+                .as_str()
+                .expect("terminal byte events must contain a base64 string");
+            assert_eq!(STANDARD.decode(encoded).unwrap(), expected.as_bytes());
+        }
+    }
 
     // ── check_auth_result ──────────────────────────────────────────
 
