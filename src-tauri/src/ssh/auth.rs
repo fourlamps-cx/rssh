@@ -43,6 +43,17 @@ fn emit_passphrase_error(ctx: &AuthCtx, remaining: usize) {
         .emit_bytes(&format!("ssh:data:{}", ctx.prompt_id), msg.as_bytes());
 }
 
+// Only classify decryption failures after the initial parse confirmed encryption.
+// Crypto can also indicate malformed input when no passphrase has been supplied.
+fn is_passphrase_error(error: &russh::keys::Error) -> bool {
+    matches!(
+        error,
+        russh::keys::Error::KeyIsEncrypted
+            | russh::keys::Error::SshKey(russh::keys::ssh_key::Error::Crypto)
+            | russh::keys::Error::Unpad(_)
+    )
+}
+
 /// 解析私钥，遇加密时按需向终端索取 passphrase。
 ///
 /// `cache_key` 唯一标识这把私钥在本次进程内的 passphrase 缓存项：
@@ -79,7 +90,7 @@ pub(crate) async fn decode_key_with_prompt(
         if let Some(pw) = cached {
             match russh::keys::decode_secret_key(pem, Some(pw.as_str())) {
                 Ok(k) => return Ok(k),
-                Err(KeyIsEncrypted) => {
+                Err(e) if is_passphrase_error(&e) => {
                     // 缓存的 passphrase 不再匹配（用户改了密码）— 清掉再走交互
                     let state = ctx.app.state();
                     if let Ok(mut m) = locked(&state.passphrase_cache) {
@@ -112,7 +123,7 @@ pub(crate) async fn decode_key_with_prompt(
                 }
                 return Ok(k);
             }
-            Err(KeyIsEncrypted) => {
+            Err(e) if is_passphrase_error(&e) => {
                 let remaining = MAX_PASSPHRASE_RETRIES - attempt - 1;
                 emit_passphrase_error(ctx, remaining);
             }

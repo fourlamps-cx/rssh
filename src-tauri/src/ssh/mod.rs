@@ -8,6 +8,9 @@ pub mod prompt;
 pub mod sftp;
 
 #[cfg(test)]
+mod auth_tests;
+
+#[cfg(test)]
 pub(crate) mod test_support {
     use std::collections::HashMap;
     use std::path::PathBuf;
